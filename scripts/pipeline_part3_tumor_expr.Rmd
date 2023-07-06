@@ -1,0 +1,539 @@
+---
+title: "Pipeline - Part 3 - Tumour infiltrating T cells"
+author: "Akashdip Singh"
+date: "`r Sys.Date()`"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE, message = FALSE,
+                      tidy = TRUE)
+knitr::opts_knit$set(root.dir = "..")
+
+```
+
+## load stuff
+
+```{r}
+
+library(tidyverse)
+library(vroom)
+library(pheatmap)
+library(UpSetR)
+
+todate <- format(Sys.Date(),"%y%m%d")
+todate <- "230222"
+todate <- "230306"
+todate <- "230620"
+
+plotsF <- file.path("./plots/part3",todate, "/")
+outputF <- file.path("./output/part3",todate, "/")
+processedF <- file.path("./processed/part3",todate, "/")
+folders <- c(plotsF,outputF,processedF)
+for(folder in folders){
+  if(!dir.exists(folder)){
+    dir.create(folder,recursive = TRUE)
+  }
+}
+
+knownr <- read_lines("./data/known_receptors.txt")
+
+```
+
+## load predicted receptors and annotation
+
+```{r}
+
+pred_files <- list.files("./data/pipeline/",pattern = "_predicted_receptors.txt")
+new_hits <- read_lines(paste0("./data/pipeline/",pred_files[length(pred_files)]))
+
+annot_files <- list.files("./data/pipeline/",pattern = "df_annotation_newhits.rds")
+annot_gene <- readRDS(paste0("./data/pipeline/",annot_files[length(annot_files)]))
+
+genes_single <- annot_gene %>% 
+  filter(single == "single") %>% 
+  pull(gene_symbol) %>% 
+  unique()
+
+genes_multi <- annot_gene %>% 
+  filter(single == "multi") %>% 
+  pull(gene_symbol) %>% 
+  unique()
+
+genes_known <- annot_gene %>% 
+  filter(known == "known") %>% 
+  pull(gene_symbol) %>% 
+  unique()
+
+genes_unknown <- annot_gene %>% 
+  filter(known == "unknown") %>% 
+  pull(gene_symbol) %>% 
+  unique()
+
+annot_plot <- annot_gene %>% 
+  distinct(gene_symbol, known) %>%
+  remove_rownames() %>% 
+  column_to_rownames("gene_symbol")
+
+annot_colors <- list(known = c(known = hcl.colors(2, "Viridis")[1], 
+                               unknown = hcl.colors(2, "Viridis")[2]),
+                     celltype = c(CD4 = hcl.colors(2, "Cyan-Magenta")[1],
+                                  CD8 = hcl.colors(2, "Cyan-Magenta")[2]))
+
+```
+
+## load data
+
+Just going to load this in once, because big files
+10.5281/zenodo.5461803. Also only kept RNAseq data for the 1562 identified receptors, to make it easier later
+
+```{r eval = FALSE}
+
+all_IIR_files <- list.files("./data/pipeline/",pattern = "_all_IIR_genes.txt")
+new_receptors <- read_lines(paste0("./data/pipeline/",all_IIR_files[length(all_IIR_files)]))
+
+ct_folder <- "D:/cancer_tcells/"
+dir.create(file.path("./data/RNAseq/TILs_Zheng"))
+
+CD8_expr <- paste0(ct_folder,"01.CD8.expr.txt")
+df8 <- vroom(CD8_expr) %>%
+  dplyr::rename("sample" = "...1") %>%
+  as_tibble() %>%
+  dplyr::select(sample, any_of(new_receptors)) %>% 
+  saveRDS(paste0("./data/RNAseq/TILs_Zheng/",todate,"_df8_expr.rds"))
+
+CD4_expr <- paste0(ct_folder,"CD4.expr.txt")
+vroom(CD4_expr) %>%
+  dplyr::rename("sample" = "...1") %>%
+  as_tibble() %>% 
+  dplyr::select(sample, any_of(new_receptors)) %>% 
+  saveRDS(paste0("./data/RNAseq/TILs_Zheng/",todate,"_df4_expr.rds"))
+
+```
+
+## processing TIL data
+
+Next, we load all the data for the CD4 and CD8 T cells along with their annotation, and simplify the clusters a bit. 
+
+```{r}
+
+CD8_expr <- readRDS("./data/RNAseq/TILs_Zheng/221219_df8_expr.rds")
+CD4_expr <- readRDS("./data/RNAseq/TILs_Zheng/221219_df4_expr.rds")
+
+metadata8 <- readRDS(paste0("./data/RNAseq/TILs_Zheng/CD8meta.tb.rds")) %>% 
+  distinct(miniCluster, dataset, meta.cluster)
+
+CD8_subsets <- c("naive",
+                 "effector memory",
+                 "EMRA",
+                 "KIR T cell",
+                 "memory",
+                 "exhausted",
+                 "resident memory",
+                 "other")
+
+annot_col8 <- tibble(cluster = unique(metadata8$meta.cluster)) %>% 
+  mutate(subset = case_when(grepl("Tk",cluster) ~ "KIR T cell",
+                           grepl("Tem\\.",cluster) ~ "effector memory",
+                           grepl("Tex\\.",cluster) ~ "exhausted",
+                           grepl("Tn\\.",cluster) ~ "naive",
+                           grepl("Temra\\.",cluster) ~ "EMRA",
+                           grepl("Tm\\.",cluster) ~ "memory",
+                           grepl("Trm\\.",cluster) ~ "resident memory",
+                           TRUE ~ "other"),
+        subset = factor(subset, level = CD8_subsets)) %>% 
+  column_to_rownames("cluster") %>% 
+  as.data.frame()
+
+df8 <- CD8_expr %>% 
+  left_join(metadata8, by = c("sample" = "miniCluster")) %>%
+  left_join(as_tibble(annot_col8, rownames = "meta.cluster")) %>%
+  dplyr::select(sample, meta.cluster, subset, any_of(new_hits)) %>% 
+  arrange(subset) %>% 
+  pivot_longer(cols = any_of(new_hits),
+               names_to = "gene_symbol",
+               values_to = "expr") %>% 
+  mutate(celltype = "CD8")
+
+metadata4 <- readRDS(paste0("./data/RNAseq/TILs_Zheng/CD4meta.tb.rds")) %>% 
+  distinct(miniCluster, dataset, meta.cluster)
+
+CD4_subsets <- c("naive",
+                 "effector memory",
+                 "EMRA",
+                 "memory",
+                 "Th17",
+                 "regulatory", 
+                 "follicular helper",
+                 "other")
+
+annot_col4 <- tibble(cluster = unique(metadata4$meta.cluster)) %>% 
+  mutate(subset = case_when(grepl("Tfh",cluster) ~ "follicular helper",
+                            grepl("Tem\\.",cluster) ~ "effector memory",
+                            grepl("Th17\\.",cluster) ~ "Th17",
+                            grepl("Tn\\.",cluster) ~ "naive",
+                            grepl("Temra\\.",cluster) ~ "EMRA",
+                            grepl("Tm\\.",cluster) ~ "memory",
+                            grepl("Treg\\.",cluster) ~ "regulatory",
+                            TRUE ~ "other"),
+         subset = factor(subset, levels = CD4_subsets)) %>%
+  column_to_rownames("cluster") %>% 
+  as.data.frame()
+
+df4 <- CD4_expr %>% 
+  left_join(metadata4, by = c("sample" = "miniCluster")) %>%
+  left_join(as_tibble(annot_col4, rownames = "meta.cluster")) %>%
+  dplyr::select(sample, meta.cluster, subset, any_of(new_hits)) %>% 
+  arrange(subset) %>% 
+  pivot_longer(cols = any_of(new_hits),
+               names_to = "gene_symbol",
+               values_to = "expr") %>% 
+  mutate(celltype = "CD4")
+
+subset_order <- c("naive",
+                  "effector memory",
+                  "EMRA",
+                  "KIR T cell",
+                  "memory",
+                  "exhausted",
+                  "resident memory",
+                  "Th17",
+                  "regulatory",
+                  "follicular helper",
+                  "other")
+
+df_all <- bind_rows(df8, df4) %>% 
+  mutate(subset = factor(subset, levels = subset_order))
+
+df_all %>%
+  saveRDS(paste0(processedF,todate,"_df_TIL.rds"))
+
+annot_col <- bind_rows(annot_col8, annot_col4) %>% 
+  mutate(celltype = case_when(grepl("CD8",rownames(.)) ~ "CD8",
+                              grepl("CD4",rownames(.)) ~ "CD4"))
+
+annot_col %>% 
+  saveRDS(paste0(processedF,todate,"_annot_col.rds"))
+
+
+```
+
+## plotting data
+
+For the expression analysis, we take the average zscore for all cells in a single meta.cluster, and then take the weighted mean of all meta.clusters belonging to a T cell subset. We consider something expressed when the zscore is above 0
+
+```{r}
+
+genes_RNAseq <- df_all %>% 
+  pull(gene_symbol) %>% 
+  unique()
+
+genes_single %in% genes_RNAseq %>% sum
+genes_multi %in% genes_RNAseq %>% sum
+
+df_clean <- df_all %>%
+  filter(gene_symbol %in% genes_single) %>%
+  group_by(gene_symbol, celltype, subset,  meta.cluster) %>%
+  summarise(expr = mean(expr),
+            sum_meta = n()) %>% 
+  group_by(gene_symbol, celltype, subset) %>%
+  summarise(mean = weighted.mean(expr,sum_meta))
+
+df_counts <- df_clean %>%
+  filter(mean > 0) %>%
+  group_by(celltype, subset) %>%
+  summarise(count = n())
+
+df_counts %>% 
+  ggplot(mapping = aes(x = subset, y = count, fill = subset)) +
+  facet_wrap(~ celltype, scales = "free_x") +
+  geom_bar(color = "black",
+           linewidth = 0.1,
+           stat = "identity") +
+  theme_minimal() +
+  scale_fill_manual(values = hcl.colors(11, 
+                                        palette = "Set 2")) +
+  scale_y_continuous(breaks = seq(from = 0, to = 101, by = 20),
+                     expand = c(0,2)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1,
+                                   vjust = 1.1))
+ggsave(paste0(plotsF,todate,"_single_subsets.png"),
+       width = 12, height = 10)
+
+df_matrix <- df_clean %>% 
+  group_by(celltype,subset) %>% 
+  mutate(mean = ifelse(mean < 0, 0, mean),
+         subset = paste(celltype,subset,sep = "_"),
+         subset = factor(subset, levels = unique(subset))) %>% 
+  arrange(celltype, subset) %>% 
+  pivot_wider(id_cols = subset,
+              names_from = gene_symbol,
+              values_from = mean) %>%
+  column_to_rownames("subset") %>% 
+  as.matrix() %>% 
+  t()
+
+matrix_plot <- df_matrix %>%                  
+  pheatmap(scale = "none",
+           cluster_rows = TRUE,
+           cluster_cols = FALSE,
+           #annotation_col = annot_col,
+           annotation_row = annot_plot,
+           annotation_colors = annot_colors,
+           fontsize_row = 8,
+           color = c("grey20",hcl.colors(1000,
+                              palette = "RdYlBu",
+                              rev = TRUE)),
+           cellwidth = 18,
+           gaps_col = 8)
+
+print(matrix_plot)
+
+pdf(paste0(plotsF, todate, "_matrix_single.pdf"),
+    width = 15, height = 15)
+grid::grid.newpage()
+grid::grid.draw(matrix_plot$gtable)
+dev.off()
+
+```
+
+## upsetplots single
+
+```{r}
+
+df_upset <- df_clean %>% 
+  mutate(expr = ifelse(mean > 0, TRUE, FALSE)) %>% 
+  group_by(celltype, subset, gene_symbol) %>% 
+  mutate(check = any(expr)) %>%
+  distinct(celltype, subset, gene_symbol, check) %>% 
+  ungroup() %>% 
+  mutate(subset = paste(celltype, subset, sep = "_")) %>% 
+  pivot_wider(id_cols = gene_symbol,
+              names_from = subset,
+              values_from = check) %>% 
+  mutate(across(-gene_symbol, function(x) case_when(x ~ 1,
+                                                    !x ~ 0)))
+
+single_upset4 <- df_upset %>% 
+  dplyr::select(gene_symbol, contains("CD4")) %>% 
+  column_to_rownames("gene_symbol") %>% 
+  upset(nsets = 8, nintersects = NA)
+
+single_upset8 <- df_upset %>% 
+  dplyr::select(gene_symbol, contains("CD8")) %>% 
+  column_to_rownames("gene_symbol") %>% 
+  upset(nsets = 8, nintersects = NA)
+
+print(single_upset4)
+print(single_upset8)
+
+graphics.off()
+pdf(file = paste0(plotsF,todate,"_single_upset4.pdf"),
+    width = 10, height = 6)
+print(single_upset4)
+pdf(file = paste0(plotsF,todate,"_single_upset8.pdf"),
+    width = 10, height = 6)
+print(single_upset8)
+graphics.off()
+
+
+```
+
+## matrix subsets
+
+```{r eval = FALSE}
+
+df_matrix4 <- df_matrix %>% 
+  t() %>% 
+  subset(str_detect(rownames(.),"CD4")) %>% 
+  t()
+
+df_matrix4 %>%
+  pheatmap(scale = "none",
+           cluster_cols = FALSE,
+           color = c("grey20",hcl.colors(1000,
+                                         palette = "RdYlBu",
+                                         rev = TRUE)),
+           #annotation_col = annot_col4,
+           annotation_row = annot_plot,
+           annotation_colors = annot_colors,
+           fontsize_row = 8,
+           cellwidth = 18)
+
+df_matrix8 <- df_matrix %>% 
+  t() %>% 
+  subset(str_detect(rownames(.),"CD8")) %>% 
+  t()
+
+df_matrix8 %>%
+  pheatmap(scale = "none",
+           cluster_cols = FALSE,
+           color = c("grey20",hcl.colors(1000,
+                                         palette = "RdYlBu",
+                                         rev = TRUE)),
+           #annotation_col = annot_col8,
+           annotation_row = annot_plot,
+           annotation_colors = annot_colors,
+           fontsize_row = 8,
+           cellwidth = 18)
+
+```
+
+## plots multispanner
+
+```{r eval = FALSE}
+
+df_clean <- df_all %>%
+  filter(gene_symbol %in% genes_multi) %>%
+  group_by(gene_symbol, celltype, subset,  meta.cluster) %>%
+  summarise(expr = mean(expr),
+            sum_meta = n()) %>% 
+  group_by(gene_symbol, celltype, subset) %>%
+  summarise(mean = weighted.mean(expr,sum_meta))
+
+df_counts <- df_clean %>% 
+  filter(mean > 0) %>% 
+  group_by(celltype, subset) %>% 
+  summarise(count = n())
+
+df_counts %>% 
+  ggplot(mapping = aes(x = subset, y = count, fill = subset)) +
+  facet_wrap(~ celltype, scales = "free_x") +
+  geom_bar(color = "black",
+           linewidth = 0.1,
+           stat = "identity") +
+  theme_minimal() +
+  scale_fill_manual(values = hcl.colors(11, 
+                                        palette = "Set 2")) +
+  scale_y_continuous(breaks = seq(from = 0, to = 101, by = 20),
+                     expand = c(0,2)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1,
+                                   vjust = 1.1))
+ggsave(paste0(plotsF,todate,"_multi_subsets.png"),
+       width = 12, height = 10)
+
+df_matrix <- df_clean %>% 
+  group_by(celltype,subset) %>% 
+  mutate(mean = ifelse(mean < 0, 0, mean),
+         subset = paste(celltype,subset,sep = "_"),
+         subset = factor(subset, levels = unique(subset))) %>% 
+  arrange(celltype, subset) %>% 
+  pivot_wider(id_cols = subset,
+              names_from = gene_symbol,
+              values_from = mean) %>%
+  column_to_rownames("subset") %>% 
+  as.matrix() %>% 
+  t()
+
+matrix_plot <- df_matrix %>%                  
+  pheatmap(scale = "none",
+           cluster_rows = TRUE,
+           cluster_cols = FALSE,
+           #annotation_col = annot_col,
+           annotation_row = annot_plot,
+           annotation_colors = annot_colors,
+           fontsize_row = 8,
+           color = c("grey20",hcl.colors(1000,
+                              palette = "RdYlBu",
+                              rev = TRUE)),
+           cellwidth = 18,
+           gaps_col = 8)
+
+print(matrix_plot)
+
+pdf(paste0(plotsF, todate, "_matrix_multi.pdf"),
+    width = 15, height = 15)
+grid::grid.newpage()
+grid::grid.draw(matrix_plot$gtable)
+dev.off()
+
+#upset
+
+df_upset <- df_clean %>% 
+  mutate(expr = ifelse(mean > 0, TRUE, FALSE)) %>% 
+  group_by(celltype, subset, gene_symbol) %>% 
+  mutate(check = any(expr)) %>%
+  distinct(celltype, subset, gene_symbol, check) %>% 
+  ungroup() %>% 
+  mutate(subset = paste(celltype, subset, sep = "_")) %>% 
+  pivot_wider(id_cols = gene_symbol,
+              names_from = subset,
+              values_from = check) %>% 
+  mutate(across(-gene_symbol, function(x) case_when(x ~ 1,
+                                                    !x ~ 0)))
+
+multi_upset4 <- df_upset %>% 
+  dplyr::select(gene_symbol, contains("CD4")) %>% 
+  column_to_rownames("gene_symbol") %>% 
+  upset(nsets = 8, nintersects = NA)
+
+multi_upset8 <- df_upset %>% 
+  dplyr::select(gene_symbol, contains("CD8")) %>% 
+  column_to_rownames("gene_symbol") %>% 
+  upset(nsets = 8, nintersects = NA)
+
+print(multi_upset4)
+print(multi_upset8)
+
+graphics.off()
+pdf(file = paste0(plotsF,todate,"_multi_upset4.pdf"),
+    width = 10, height = 6)
+print(multi_upset4)
+pdf(file = paste0(plotsF,todate,"_multi_upset8.pdf"),
+    width = 10, height = 6)
+print(multi_upset8)
+graphics.off()
+
+```
+
+## export for patent
+
+```{r eval = FALSE}
+
+library(writexl)
+
+exp_table <- list()
+
+df_exp_single <- df_all %>%
+  filter(gene_symbol %in% genes_single) %>%
+  group_by(gene_symbol, celltype, subset,  meta.cluster) %>%
+  summarise(expr = mean(expr),
+            sum_meta = n()) %>% 
+  group_by(gene_symbol, celltype, subset) %>%
+  summarise(mean = weighted.mean(expr,sum_meta)) %>% 
+  mutate(expr = ifelse(mean > 0, TRUE, FALSE)) %>% 
+  distinct(celltype, subset, gene_symbol, expr) %>% 
+  ungroup() %>% 
+  mutate(subset = paste(celltype, subset, sep = "_"))
+
+df_exp_multi <- df_all %>%
+  filter(gene_symbol %in% genes_multi) %>%
+  group_by(gene_symbol, celltype, subset,  meta.cluster) %>%
+  summarise(expr = mean(expr),
+            sum_meta = n()) %>% 
+  group_by(gene_symbol, celltype, subset) %>%
+  summarise(mean = weighted.mean(expr,sum_meta)) %>% 
+  mutate(expr = ifelse(mean > 0, TRUE, FALSE)) %>% 
+  distinct(celltype, subset, gene_symbol, expr) %>% 
+  ungroup() %>% 
+  mutate(subset = paste(celltype, subset, sep = "_"))
+
+exp_table[["single"]] <- df_exp_single %>% 
+  filter(expr) %>% 
+  group_by(subset) %>% 
+  summarise(gene_symbol = paste(gene_symbol, collapse = "|"))
+
+exp_table[["multi"]] <- df_exp_multi %>% 
+  filter(expr) %>% 
+  group_by(subset) %>% 
+  summarise(gene_symbol = paste(gene_symbol, collapse = "|"))
+
+exp_table %>% 
+  write_xlsx(path = paste0(outputF,todate,"_table_for_patent.xlsx"))
+
+
+```
+

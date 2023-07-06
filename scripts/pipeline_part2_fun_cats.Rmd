@@ -1,0 +1,753 @@
+---
+title: "Pipeline - Part 2 - Functional categorization"
+author: "Akashdip Singh"
+date: "`r Sys.Date()`"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE, message = FALSE,
+                      tidy = TRUE)
+knitr::opts_knit$set(root.dir = "..")
+
+```
+
+## load libraries and stuff
+
+```{r}
+library(tidyverse)
+library(DESeq2)
+library(biomaRt)
+library(ggpubr)
+library(pheatmap)
+library(lfc)
+library(UpSetR)
+library(readxl)
+library(writexl)
+
+todate <- format(Sys.Date(),"%y%m%d")
+todate <- "230222"
+todate <- "230306"
+todate <- "230620"
+
+plotsF <- file.path("./plots/part2",todate,"/")
+outputF <- file.path("./output/part2",todate,"/")
+processedF <- file.path("./processed/part2",todate,"/")
+folders <- c(plotsF,outputF,processedF)
+for(folder in folders){
+  if(!dir.exists(folder)){
+    dir.create(folder,recursive = TRUE)
+  }
+}
+
+knownr <- read_lines("./data/known_receptors.txt")
+
+```
+
+## load receptors and annotation
+
+Load in the predicted receptors, novel hits and annotation from part 1
+
+```{r}
+
+pred_files <- list.files("./data/pipeline/",pattern = "_predicted_receptors.txt")
+new_hits <- read_lines(paste0("./data/pipeline/",pred_files[length(pred_files)]))
+
+annot_files <- list.files("./data/pipeline/",pattern = "df_annotation_newhits.rds")
+annot_gene <- readRDS(paste0("./data/pipeline/",annot_files[length(annot_files)]))
+
+genes_single <- annot_gene %>% 
+  filter(single == "single") %>% 
+  pull(gene_symbol) %>% 
+  unique()
+
+genes_multi <- annot_gene %>% 
+  filter(single == "multi") %>% 
+  pull(gene_symbol) %>% 
+  unique()
+
+genes_known <- annot_gene %>% 
+  filter(known == "known") %>% 
+  pull(gene_symbol) %>% 
+  unique()
+
+genes_unknown <- annot_gene %>% 
+  filter(known == "unknown") %>% 
+  pull(gene_symbol) %>% 
+  unique()
+
+innate_cells <- "NK|Mono|Neutro"
+adaptive_cells <- "B cells|CD4|CD8"
+myeloid_cells <- "Mono|Neutro"
+
+celltypes <- c("Neutrophils",
+               "Monocytes",
+               "NK cells",
+               "B cells",
+               "CD4 T cells",
+               "CD8 T cells")
+
+celltypes_full <- c("Neutrophils_R",
+                    "Neutrophils_S",
+                    "Monocytes_R",
+                    "Monocytes_S",
+                    "NK cells_R",
+                    "NK cells_S",
+                    "B cells_R",
+                    "B cells_S",
+                    "CD4 T cells_R",
+                    "CD4 T cells_S",
+                    "CD8 T cells_R",
+                    "CD8 T cells_S")
+
+annot_col <- tibble(celltype = celltypes_full) %>%
+  mutate(response = case_when(str_detect(celltype, innate_cells) ~ "innate",
+                              str_detect(celltype, adaptive_cells) ~ "adaptive"),
+         activation = case_when(str_detect(celltype, "_R") ~ "resting",
+                                str_detect(celltype, "_S") ~ "stimulated"),
+         lineage = case_when(str_detect(celltype, myeloid_cells) ~ "myeloid",
+                             !str_detect(celltype, myeloid_cells) ~ "lymphoid")) %>%
+  column_to_rownames("celltype")
+
+annot_colors <- list(TMtype = c(type1 = hcl.colors(3, "Temps")[1],
+                                type2 = hcl.colors(3, "Temps")[2],
+                                multi = hcl.colors(3, "Temps")[3]),
+                     nr_ITIMs = rev(hcl.colors(20, "Batlow")),
+                     known = c(known = hcl.colors(2, "Viridis")[1], 
+                               unknown = hcl.colors(2, "Viridis")[2]),
+                     ITSM = c(ITIM_ITSM = hcl.colors(3, "Hawaii")[1],
+                              ITSM = hcl.colors(3, "Hawaii")[2],
+                              noITSM = hcl.colors(3, "Hawaii")[3]),
+                     response = c(innate = hcl.colors(2, "Cyan-Magenta")[1],
+                                adaptive = hcl.colors(2, "Cyan-Magenta")[2]),
+                     activation = c(resting = hcl.colors(2, "Green-Orange")[1],
+                                     stimulated = hcl.colors(2, "Green-Orange")[2]),
+                     lineage = c(myeloid = hcl.colors(2, "Harmonic")[1],
+                                 lymphoid = hcl.colors(2, "Harmonic")[2]))
+
+```
+
+## functions and stuff
+
+Stuff to help with making nicer figures
+
+```{r}
+
+nice_theme <- theme(axis.text = element_text(size = 18),
+                    axis.title.x = element_blank(),
+                    axis.title.y = element_text(size = 15),
+                    legend.text = element_text(size = 14),
+                    legend.title = element_text(size = 16),
+                    panel.grid.major.x = element_blank(),
+                    panel.grid.minor = element_blank())
+
+pheatmap_c <- function(x, width = 10, height = 35, 
+                       gaps_col = seq(from = 0, to = ncol(x), by = 2),
+                       cluster_cols = FALSE,
+                       annotation_colors = annot_colors,
+                       annotation_row = annot_gene,
+                       annotation_col = annot_col, ...){
+  x %>%  
+    pheatmap(annotation_row = annotation_row,
+             annotation_colors = annotation_colors,
+             annotation_col = annotation_col,
+             cluster_cols = cluster_cols,
+             gaps_col = gaps_col,
+             width = width, height = height,
+             ...)
+}
+
+```
+
+## load immune cell data
+
+First we load in the RNAseq data from (10.1038/s41588-019-0505-9). We match the IDs to gene symbols and normalize the count matrix using DESeq2 and vst. We simplify expression of all immune cell subsets into major cell types, so at the end we have expression for each cell type, in stimulated or unstimuated conditions. 
+
+```{r}
+
+if(!exists("df_RNA")){
+  df_RNA <- read.delim("./data/RNAseq/GSE118165_RNA_gene_abundance.txt.gz") %>%
+    rownames_to_column(var = "ensembl_gene_id") 
+}
+
+if(!exists("ensembl")){
+  ensembl <- useMart("ensembl", dataset = "hsapiens_gene_ensembl", 
+                        host = "https://oct2022.archive.ensembl.org")
+
+  annot <- getBM(attributes = c("ensembl_gene_id","hgnc_symbol"),
+                 filters = "ensembl_gene_id",
+                 values = unique(df_RNA$ensembl_gene_id),
+                 mart = ensembl) %>%
+    dplyr::rename("gene_symbol" = "hgnc_symbol")
+}
+
+annotation_celltype <- read_xlsx("./data/RNAseq/GSE118165_annotation.xlsx")
+
+if(!file.exists(paste0(processedF,todate,"_calderon_data.rds"))){
+  counts <- df_RNA[, -1]
+    
+  rownames(counts) <- df_RNA[, 1]
+  
+  meta <- tibble(
+    row = colnames(df_RNA)[-1],
+    sample = case_when(str_detect(row, "U$") ~ "unstimulated",
+                       str_detect(row, "S$") ~ "stimulated")) %>%
+    column_to_rownames("row") %>%
+    as.data.frame()
+  
+  dds <- DESeqDataSetFromMatrix(countData = round(counts),
+                                colData = meta,
+                                design = ~ sample) %>%
+    DESeq()
+  
+  vsd <- getVarianceStabilizedData(dds)
+ 
+  df_calderon <- vsd %>%
+    as_tibble(rownames = "ensembl_gene_id") %>%
+    left_join(annot) %>%
+    filter(!duplicated(gene_symbol),!gene_symbol == "") %>%
+    dplyr::select(-ensembl_gene_id) %>%
+    pivot_longer(-c("gene_symbol") , names_to = "sample", values_to = "TPM") %>%
+    mutate(sample = gsub("\\.", "-", sample),
+           sample = gsub("X", "", sample)) %>%
+    left_join(annotation_celltype) %>%
+    mutate(celltype = paste(celltype, stimulation, sep = "_"),
+           stimulation = NULL) %>% 
+    filter(!str_detect(sample, "DCs-"),
+           !str_detect(celltype, "gdT cells")) %>%
+    group_by(gene_symbol, celltype) %>%
+    summarise(meanTPM = mean(TPM)) %>%
+    group_by(celltype) %>%
+    mutate(median_expr = median(meanTPM)) %>%
+    filter(gene_symbol %in% new_hits)
+  
+  rm(vsd)
+  rm(dds)
+  rm(df_RNA)
+  rm(counts)
+
+  df_calderon %>% 
+    saveRDS(paste0(processedF,todate,"_calderon_data.rds"))
+  
+} else{
+  df_calderon <- readRDS(paste0(processedF, todate, "_calderon_data.rds"))
+}
+
+```
+
+## load granulocyte data
+
+This data is from (10.1126/sciimmunol.aaf8471). We again simplify expression to just resting and stimulated samples, although there are different stimulations and timepoints. 
+
+```{r}
+
+if(!file.exists(paste0(processedF,todate,"_granulocyte_data.rds"))){
+  files <- list.files("./data/RNAseq/GSE73313/")
+  files <- files[grepl("GSM", files)]
+  tables <- list()
+  for (i in 1:length(files)) {
+    k <- paste0("./data/RNAseq/GSE73313/", files[i])
+    table <- read_delim(k)[, c("gene_id", "TPM")]
+    
+    filename <- gsub("_.*", "", files[i])
+    
+    colnames(table) <- c("gene_id", filename)
+    tables[[files[i]]] <- table
+  }
+  
+  GSE_annot <- read_delim("./data/RNAseq/GSE73313/annotation.txt",
+                          col_names = c("sample_id", "sample_type"))
+  
+  df_GRA <- Reduce(merge, tables) %>%
+    rename_at(vars(GSE_annot$sample_id), ~ GSE_annot$sample_type) %>%
+    dplyr::rename("gene_symbol" = "gene_id") %>%
+    as_tibble() %>%
+    pivot_longer(cols = -gene_symbol,
+                 names_to = "sample",
+                 values_to = "TPM") %>%
+    mutate(celltype = case_when(str_detect(sample, "CTL") ~ "Neutrophils_R",
+                                !str_detect(sample, "CTL") ~ "Neutrophils_S")) %>%
+    group_by(gene_symbol, celltype) %>%
+    summarise(meanTPM = mean(log2(TPM+1))) %>% 
+    group_by(celltype) %>%
+    mutate(median_expr = median(meanTPM)) %>% 
+    filter(gene_symbol %in% new_hits)
+  
+  df_GRA %>%
+    saveRDS(paste0(processedF, todate, "_granulocyte_data.rds"))
+  
+}else{
+  df_GRA <- readRDS(paste0(processedF,todate,"_granulocyte_data.rds"))
+}
+
+```
+
+## merge datasets + funcats
+
+Next we merge the two datasets, keeping only those genes that expressed in both. We also define functional categories based on the expression pattern before and after stimulation.
+
+
+```{r}
+
+gene_symbols_all <- intersect(df_GRA$gene_symbol, df_calderon$gene_symbol)
+genes_known[!genes_known %in% gene_symbols_all]
+genes_unknown[!genes_unknown %in% gene_symbols_all] %>% length()
+
+df_all <- df_GRA %>% 
+  bind_rows(df_calderon) %>% 
+  mutate(celltype = factor(celltype, levels = celltypes_full)) %>% 
+  na.omit() %>%
+  filter(gene_symbol %in% gene_symbols_all)
+
+if(!file.exists(paste0(processedF,todate,"_df_logFC.rds"))){
+  df_logFC <- df_all %>%
+    group_by(gene_symbol) %>%
+    separate(celltype,
+             into = c("celltype", "stimulation"),
+             sep = "_") %>%
+    mutate(known = case_when(gene_symbol %in% genes_known ~ "known",
+                             !gene_symbol %in% genes_known ~ "unknown"),
+           known = factor(known, levels = c("known", "unknown")),
+           celltype = factor(celltype, levels = celltypes)) %>%
+    group_by(gene_symbol, celltype) %>%
+    mutate(FC = meanTPM[stimulation == "S"] / meanTPM[stimulation == "R"],
+           logFC = log2(FC),
+           expressed = meanTPM > median_expr,
+           fun_cat = case_when(!expressed[stimulation == "R"] &
+                                 !expressed[stimulation == "S"] ~ "not expressed",
+                               !expressed[stimulation == "R"] &
+                                 expressed[stimulation == "S"] ~ "negative feedback",
+                               expressed[stimulation == "R"] &
+                                 (!expressed[stimulation == "S"] | logFC < -0.5) ~ "threshold-disinhibition",
+                               expressed[stimulation == "R"] & logFC > 0.5 ~ "threshold-negative feedback",
+                               expressed[stimulation == "R"] & logFC <= 0.5 & logFC >= -0.5 ~ "threshold"), 
+           fun_cat = factor(fun_cat, levels = c("not expressed",
+                                                "negative feedback",
+                                                "threshold-negative feedback",
+                                                "threshold-disinhibition",
+                                                "threshold")))
+  
+  df_logFC %>%
+    saveRDS(paste0(processedF, todate, "_df_logFC.rds"))
+} else{
+  df_logFC <- readRDS(paste0(processedF, todate, "_df_logFC.rds"))
+}
+
+df_logFC %>% 
+  ggplot(mapping = aes(x = celltype, y = median_expr, color = stimulation)) +
+  geom_point()
+
+df_matrix <- df_all %>%
+  mutate(across(meanTPM, function(x) ifelse(x < median_expr,0,x))) %>% 
+  pivot_wider(id_cols = gene_symbol,
+              names_from = celltype,
+              values_from = meanTPM) %>%
+  dplyr::select(gene_symbol,any_of(celltypes_full)) %>% 
+  column_to_rownames("gene_symbol") %>%
+  as.matrix()
+
+df_matrix %>% 
+  saveRDS(paste0(processedF,todate,"_df_matrix.rds"))
+
+df_matrix %>% 
+  pheatmap_c(color = c("grey20",hcl.colors(n = 100,
+                                           palette = "Plasma")),
+             scale = "none", 
+             annotation_row = NA)
+
+```
+
+## make plots single span
+
+Plotting bars for each cell type and the number of functional categories being expressed
+
+```{r}
+
+df_barplot_single <- df_logFC %>%
+  filter(gene_symbol %in% genes_single) %>% 
+  distinct(gene_symbol, celltype,logFC, fun_cat, known) %>%
+  group_by(celltype, fun_cat) %>%
+  summarise(count = n()) 
+
+df_barplot_single %>%
+  ggplot(mapping = aes(x = celltype, y = count, fill = fun_cat)) +
+  geom_bar(stat = "identity", color = "black") +
+  theme_minimal() +
+  scale_fill_manual(name = "receptor category",
+                    values = c("floralwhite",hcl.colors(4,"Set 2"))) +
+  scale_y_continuous(breaks = seq(from = 0, to = 217, by = 31),
+                     expand = c(0,2)) +
+  nice_theme +
+  guides(fill = guide_legend(ncol = 1,
+                             byrow = TRUE,
+                             title.position = "top")) +
+  theme(legend.position = "right",
+        legend.spacing.y = unit(0.05, "cm"),
+        legend.spacing.x = unit(0.1, "cm"))
+
+ggsave(paste0(plotsF,todate,"_receptor_funcat_stacked.pdf"),
+       width = 15, height = 15)
+
+df_plot_single <- df_matrix %>%
+    subset(rownames(.) %in% genes_single)
+
+annot_plot <- annot_gene %>% 
+  distinct(gene_symbol, known) %>%
+  remove_rownames() %>% 
+  column_to_rownames("gene_symbol")
+
+df_plot_single %>% 
+  pheatmap_c(color = c("grey20",hcl.colors(n = 100,
+                              palette = "Plasma")),
+             scale = "none",
+             annotation_row = annot_plot,
+             fontsize_row = 8,
+             cellwidth = 25)
+
+df_plot_single %>% 
+  pheatmap_c(color = c("grey20",hcl.colors(n = 100,
+                              palette = "Plasma")),
+             scale = "none", 
+             annotation_row = annot_plot,
+             fontsize_row = 6,
+             cellwidth = 25,
+             filename = paste0(plotsF,todate,"_heatmap.pdf"),
+             width = 10, height = 13)
+graphics.off()
+
+```
+
+## upset plots single span
+
+```{r}
+
+expr_binary_single <- df_logFC %>%
+  filter(gene_symbol %in% genes_single) %>% 
+  dplyr::select(gene_symbol, celltype, fun_cat) %>%
+  distinct() %>%
+  mutate(expression = case_when(fun_cat == "not expressed" ~ 0,
+                                !fun_cat == "not expressed" ~ 1)) %>%
+  pivot_wider(id_cols = -fun_cat,
+              names_from = celltype,
+              values_from = expression) %>%
+  as.data.frame()
+
+upsetplot <- expr_binary_single %>%
+  upset(nsets = 7, nintersects = NA)
+print(upsetplot)
+
+pdf(file = paste0(plotsF,todate,"_upset_all.pdf"),
+    width = 10, height = 7)
+upsetplot
+dev.off()
+
+expr_binary_single %>%
+  dplyr::select(gene_symbol, any_of(celltypes)) %>% 
+  arrange(desc(across(-gene_symbol))) %>%
+  column_to_rownames("gene_symbol") %>%
+  pheatmap_c(cluster_row = FALSE, cluster_col = FALSE,
+             annotation_col = NA, gaps_col = FALSE,
+             annotation_row = annot_plot,
+             filename = paste0(plotsF,todate,"_ttable_single.pdf"),
+             width = 5)
+dev.off()
+
+```
+
+## make plots multi span
+
+```{r eval = FALSE}
+
+df_barplot_multi <- df_logFC %>%
+  filter(gene_symbol %in% genes_multi) %>% 
+  distinct(gene_symbol, celltype,logFC, fun_cat, known) %>%
+  group_by(celltype, fun_cat) %>%
+  summarise(count = n()) 
+
+df_barplot_multi %>%
+  ggplot(mapping = aes(x = celltype, y = count, fill = fun_cat)) +
+  geom_bar(stat = "identity", color = "black") +
+  theme_minimal() +
+  scale_fill_manual(name = "receptor category",
+                    values = c("floralwhite",hcl.colors(4,"Set 2"))) +
+  scale_y_continuous(breaks = seq(from = 0, to = 198, by = 33),
+                     expand = c(0,2)) +
+  nice_theme +
+  guides(fill = guide_legend(ncol = 1,
+                             byrow = TRUE,
+                             title.position = "top")) +
+  theme(legend.position = "right",
+        legend.spacing.y = unit(0.05, "cm"),
+        legend.spacing.x = unit(0.1, "cm"))
+
+ggsave(paste0(plotsF,todate,"_receptor_funcat_stacked_multi.pdf"),
+       width = 15, height = 15)
+
+df_plot_multi <- df_matrix %>% 
+  subset(rownames(.) %in% genes_multi)
+
+annot_plot <- annot_gene %>% 
+  distinct(gene_symbol, known) %>%
+  remove_rownames() %>% 
+  column_to_rownames("gene_symbol")
+
+df_plot_multi %>% 
+  pheatmap_c(color = c("grey20",hcl.colors(n = 100,
+                              palette = "Plasma")),
+             scale = "none",
+             annotation_colors = annot_colors,
+             annotation_row = annot_plot,
+             fontsize_row = 8,
+             cellwidth = 25)
+
+df_plot_multi %>% 
+  pheatmap_c(color = c("grey20",hcl.colors(n = 100,
+                              palette = "Plasma")),
+             scale = "none", 
+             annotation_colors = annot_colors,
+             annotation_row = annot_plot,
+             fontsize_row = 6,
+             cellwidth = 25,
+             filename = paste0(plotsF,todate,"_heatmap_multi.pdf"),
+             width = 10, height = 13)
+graphics.off()
+
+```
+
+## upset plots multi span
+
+```{r}
+
+expr_binary_multi <- df_logFC %>%
+  filter(gene_symbol %in% genes_multi) %>% 
+  dplyr::select(gene_symbol, celltype, fun_cat) %>%
+  distinct() %>%
+  mutate(expression = case_when(fun_cat == "not expressed" ~ 0,
+                                !fun_cat == "not expressed" ~ 1)) %>%
+  pivot_wider(id_cols = -fun_cat,
+              names_from = celltype,
+              values_from = expression) %>%
+  as.data.frame()
+
+upsetplot_multi <- expr_binary_multi %>%
+  upset(nsets = 7, nintersects = NA)
+print(upsetplot_multi)
+
+pdf(file = paste0(plotsF,todate,"_upset_all_multi.pdf"),
+    width = 10, height = 7)
+upsetplot_multi
+dev.off()
+
+expr_binary_multi %>%
+  dplyr::select(gene_symbol, any_of(celltypes)) %>% 
+  arrange(desc(across(-gene_symbol))) %>%
+  column_to_rownames("gene_symbol") %>%
+  pheatmap_c(cluster_row = FALSE, cluster_col = FALSE,
+             annotation_col = NA, gaps_col = FALSE,
+             annotation_row = annot_plot,
+             filename = paste0(plotsF,todate,"_ttable_multi.pdf"),
+             width = 5)
+dev.off()
+
+```
+
+
+```{r eval = FALSE}
+
+df_logFC %>%
+  filter(gene_symbol %in% genes_single) %>% 
+  dplyr::select(gene_symbol, celltype, fun_cat) %>%
+  distinct() %>%
+  mutate(expression = case_when(fun_cat %in% c("threshold","not expressed") ~ 0,
+                                !fun_cat %in% c("threshold","not expressed") ~ 1)) %>%
+  pivot_wider(id_cols = -fun_cat,
+              names_from = celltype,
+              values_from = expression) %>%
+  as.data.frame() %>% 
+  upset(nsets = 7, nintersects = NA)
+
+```
+
+## export data
+
+```{r eval = FALSE}
+
+excel_output <- list()
+
+## single split
+df_table_single_split <- df_logFC %>%
+  dplyr::select(gene_symbol, celltype, known, fun_cat) %>%
+  filter(gene_symbol %in% genes_single) %>% 
+  distinct() %>%
+  group_by(celltype, known, fun_cat) %>%
+  summarise(n = n(),
+            genes = paste(unique(gene_symbol), collapse = "|")) %>%
+  mutate(freq = round(n/sum(n)*100,digits = 2),
+         fun_cat = gsub(" ","-",fun_cat),
+         known_fun_cat = paste(known, fun_cat, sep = "_"),
+         n_genes = paste(n, genes, sep = "_"))
+
+excel_output[["single_split"]] <- df_table_single_split
+  
+excel_output[["single_split_n"]] <- df_table_single_split %>%
+  pivot_wider(id_cols = celltype,
+              names_from = known_fun_cat,
+              values_from = n) %>%
+  mutate(across(everything(),~ ifelse(is.na(.x),0,.x)))
+
+excel_output[["single_split_freq"]] <- df_table_single_split %>%
+  pivot_wider(id_cols = celltype,
+              names_from = known_fun_cat,
+              values_from = freq) %>%
+  mutate(across(everything(),~ ifelse(is.na(.x),0,.x)))
+
+excel_output[["single_stim"]] <- df_logFC %>%
+  dplyr::select(gene_symbol, celltype, stimulation, known, expressed) %>%
+  filter(gene_symbol %in% genes_single,
+         expressed) %>% 
+  distinct() %>%
+  group_by(celltype, stimulation, known) %>%
+  summarise(n = n(),
+            genes = paste(unique(gene_symbol), collapse = "|"))
+
+## single comb
+df_table_single_comb <- df_logFC %>%
+  dplyr::select(gene_symbol, celltype, fun_cat) %>%
+  filter(gene_symbol %in% genes_single) %>% 
+  distinct() %>%
+  group_by(celltype, fun_cat) %>%
+  summarise(n = n(),
+            genes = paste(unique(gene_symbol), collapse = "|")) %>%
+  mutate(freq = round(n/sum(n)*100,digits = 2),
+         fun_cat = gsub(" ","-",fun_cat),
+         n_genes = paste(n, genes, sep = "_"))
+
+excel_output[["single_comb"]] <- df_table_single_comb
+  
+excel_output[["single_comb_n"]] <- df_table_single_comb %>%
+  pivot_wider(id_cols = celltype,
+              names_from = fun_cat,
+              values_from = n) %>%
+  mutate(across(everything(),~ ifelse(is.na(.x),0,.x)))
+
+excel_output[["single_comb_freq"]] <- df_table_single_comb %>%
+  pivot_wider(id_cols = celltype,
+              names_from = fun_cat,
+              values_from = freq) %>%
+  mutate(across(everything(),~ ifelse(is.na(.x),0,.x)))
+
+excel_output[["single_stim_comb"]] <- df_logFC %>%
+  dplyr::select(gene_symbol, celltype, stimulation, expressed) %>%
+  filter(gene_symbol %in% genes_single,
+         expressed) %>% 
+  distinct() %>%
+  group_by(celltype, stimulation) %>%
+  summarise(n = n(),
+            genes = paste(unique(gene_symbol), collapse = "|"))
+
+## multi comb
+df_table_multi <- df_logFC %>%
+  dplyr::select(gene_symbol, celltype, fun_cat) %>%
+  filter(gene_symbol %in% genes_multi) %>% 
+  distinct() %>%
+  group_by(celltype, fun_cat) %>%
+  summarise(n = n(),
+            genes = paste(unique(gene_symbol), collapse = "|")) %>%
+  mutate(freq = round(n/sum(n)*100,digits = 2),
+         fun_cat = gsub(" ","-",fun_cat),
+         n_genes = paste(n, genes, sep = "_"))
+
+excel_output[["multi"]] <- df_table_multi
+  
+excel_output[["multi_n"]] <- df_table_multi %>%
+  pivot_wider(id_cols = celltype,
+              names_from = fun_cat,
+              values_from = n) %>%
+  mutate(across(everything(),~ ifelse(is.na(.x),0,.x)))
+
+excel_output[["multi_freq"]] <- df_table_multi %>%
+  pivot_wider(id_cols = celltype,
+              names_from = fun_cat,
+              values_from = freq) %>%
+  mutate(across(everything(),~ ifelse(is.na(.x),0,.x)))
+
+excel_output[["multi_stim"]] <- df_logFC %>%
+  dplyr::select(gene_symbol, celltype, stimulation, expressed) %>%
+  filter(gene_symbol %in% genes_multi,
+         expressed) %>% 
+  distinct() %>%
+  group_by(celltype, stimulation) %>%
+  summarise(n = n(),
+            genes = paste(unique(gene_symbol), collapse = "|"))
+
+#unique single
+excel_output[["unique_singles"]] <- expr_binary_single %>%
+  pivot_longer(-gene_symbol,
+               names_to = "celltype",
+               values_to = "expressed") %>%
+  filter(expressed == 1) %>%
+  group_by(gene_symbol) %>%
+  mutate(unique = !n() > 1) %>%
+  group_by(celltype) %>%
+  filter(unique) %>%
+  summarise(unique = paste(gene_symbol, collapse = "|"))
+
+#unique multi
+excel_output[["unique_multi"]] <- expr_binary_multi %>%
+  pivot_longer(-gene_symbol,
+               names_to = "celltype",
+               values_to = "expressed") %>%
+  filter(expressed == 1) %>%
+  group_by(gene_symbol) %>%
+  mutate(unique = !n() > 1) %>%
+  group_by(celltype) %>%
+  filter(unique) %>%
+  summarise(unique = paste(gene_symbol, collapse = "|"))
+
+write_xlsx(excel_output,
+           path = paste0(outputF,todate,"_functional_categorization.xlsx"))
+
+```
+
+## for patent
+
+```{r eval = FALSE}
+
+df_peptide_ids <- readRDS("./output/part1/230620/230620_filtered_steps.rds") %>% 
+  filter(low_odds,
+         low_AF) %>% 
+  dplyr::select(gene_symbol,peptide_ids)
+
+df_filters <- df_logFC %>%
+  ungroup() %>% 
+  mutate(single = gene_symbol %in% genes_single,
+         multi = gene_symbol %in% genes_multi) %>% 
+  dplyr::select(gene_symbol, celltype, fun_cat, single, multi) %>%
+  distinct() %>% 
+  left_join(df_peptide_ids) %>%  
+  mutate(group = paste(celltype,fun_cat, sep = "-"))
+
+fun_cat_tables <- list()
+for(span in c("single", "multi")) {
+  df_filters_sub <- df_filters %>%
+    filter(get(span))
+  
+  for (group_sel in unique(df_filters$group)) {
+    name <- paste(span, group_sel, sep = " ")
+    fun_cat_tables[[name]] <- df_filters_sub %>%
+      filter(group == group_sel) %>%
+      dplyr::select(gene_symbol, peptide_ids)
+  }
+}
+#fun_cat_tables
+
+write_xlsx(fun_cat_tables,
+           path = paste0(outputF,todate,"_patent_table3.xlsx"))
+
+
+```
+
+

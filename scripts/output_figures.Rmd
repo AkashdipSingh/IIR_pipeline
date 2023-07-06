@@ -1,0 +1,683 @@
+---
+title: "pipeline_Figures"
+author: "Akashdip Singh"
+date: "`r Sys.Date()`"
+output: pdf_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE, message = FALSE,
+                      tidy = TRUE)
+knitr::opts_knit$set(root.dir = "..")
+
+```
+
+## load stuff
+
+```{r}
+
+library(tidyverse)
+library(pheatmap)
+library(UpSetR)
+library(biomaRt)
+library(ggpubr)
+library(ggh4x)
+library(ggplotify)
+
+todate <- format(Sys.Date(),"%y%m%d")
+todate <- "230222"
+todate <- "230306"
+todate <- "230418"
+
+dir.create(file.path("./plots/pdf",todate,"/"), recursive = TRUE)
+dir.create(file.path("./plots/png",todate,"/"), recursive = TRUE)
+
+plotsF <- file.path("./plots/main",todate,"/")
+dir.create(plotsF, recursive = TRUE)
+
+knownr <- read_lines("./data/known_receptors.txt")
+
+
+```
+
+## part 1
+
+# figures part 1
+
+```{r}
+
+processed1 <- paste0(list.dirs("./processed/part1")[length(list.dirs("./processed/part1"))],"/")
+date1 <- str_replace_all(str_extract(processed1, "/[:digit:]*/"),"/","")
+figures1 <- list()
+
+df_odds <- readRDS(paste0(processed1, "df_odds10000.rds"))
+
+set.seed(020841)
+threshold_adj <- 0.25 + mean(runif(10000, min = 0, max = 0.01))
+
+if(!exists("annot_mane")){
+  ensembl <- useMart("ensembl",
+                     dataset = "hsapiens_gene_ensembl",
+                     host = "https://dec2021.archive.ensembl.org")
+  annot_mane <- getBM(attributes = c("ensembl_peptide_id",
+                                     "transcript_mane_select"),
+                      filter = "ensembl_peptide_id",
+                      values = unique(df_odds$peptide_id),
+                      mart = ensembl) %>%
+    dplyr::rename("mane_pep" = "transcript_mane_select",
+                  "peptide_id" = "ensembl_peptide_id") %>%
+    mutate(mane_pep = ifelse(!mane_pep == "", TRUE, FALSE))
+}
+
+df_odds_plot <- df_odds %>% 
+  arrange(peptide_id) %>% 
+  left_join(annot_mane) %>% 
+  group_by(gene_symbol) %>% 
+  filter(all(!mane_pep) | mane_pep) %>% 
+  ungroup() %>% 
+  filter(!duplicated(gene_symbol)) %>% 
+  mutate(single = case_when(TMtype %in% c("type1","type2") ~ "single",
+                            TMtype == "multi" ~ "multi"),
+         single = factor(single, levels = c("single","multi")))
+
+df_odds_plot %>% 
+  arrange(known, gene_symbol) %>% 
+  mutate(gene_symbol = ifelse(known == "known", gene_symbol, 1:n()),
+         gene_symbol = factor(gene_symbol, 
+                              levels = str_sort(gene_symbol, numeric = TRUE))) %>% 
+  ggplot(mapping = aes(x = gene_symbol, y = total_odds, color = odds_filt)) +
+  facet_nested(~ known + single, scales = "free_x") +
+  geom_hline(yintercept = threshold_adj, alpha = 0.2, linetype = "dotdash") +
+  geom_hline(yintercept = 0.25) +
+  geom_hline(yintercept = 0.05, alpha = 0.3) +
+  geom_point() +
+  theme(axis.ticks.x = element_blank(),
+        axis.text.x = element_text(angle = 90, hjust = 0.5, vjust = 1)) +
+  scale_color_manual(values = c("gray50","black")) +
+  guides(color = "none") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1,
+                                   vjust = 0.5, size = 6),
+        axis.title.x = element_blank(),
+        panel.spacing = unit(0.75, "lines")) +
+  force_panelsizes(cols = c(1,0.7,0.7))
+figures1[[1]] <- last_plot()
+
+df_odds_plot %>%
+  ggplot(mapping = aes(x = total_length, y = total_odds)) +
+  facet_nested(~ known + single) +
+  geom_point(mapping = aes(color = odds_filt)) +
+  geom_hline(yintercept = threshold_adj, alpha = 0.2, linetype = "dotdash") +
+  geom_hline(yintercept = 0.25) +
+  geom_hline(yintercept = 0.05, alpha = 0.3) +
+  scale_color_manual(values = c("gray50","black")) +
+  geom_smooth(method = "glm") +
+  guides(color = "none") +
+  theme_minimal() +  
+  scale_y_continuous(limits = c(0,1)) +
+  scale_x_log10() +
+  xlab("intracellular domain length") +
+  ylab("ITIM likelihood")
+figures1[[2]] <- last_plot()
+
+df_odds_plot %>%
+  mutate(TMtype = factor(TMtype, levels = c("type1","type2","multi"))) %>% 
+  ggplot(mapping = aes(x = odds_filt, y = total_length)) +
+  stat_boxplot(geom = "errorbar", width = 0.2) +
+  geom_boxplot(outlier.shape = NA, width = 0.6) +
+  geom_jitter(width = 0.25, size = 1,
+              mapping = aes(color = TMtype)) +
+  stat_compare_means(label = "p.format") +
+  theme_minimal() +
+  scale_y_log10() +
+  xlab("inclusion/exclusion") +
+  ylab("total intracellular domain length") +
+  guides(color = guide_legend(nrow = 1)) +
+  theme(legend.position = "top")
+figures1[[3]] <- last_plot()
+
+
+
+df_AF <- readRDS(paste0(processed1, "df_AF_all.rds"))
+
+df_AF_plot <- df_odds %>%
+  filter(odds_filt == "incl") %>%
+  inner_join(df_AF) %>% 
+  arrange(peptide_id) %>% 
+  left_join(annot_mane) %>% 
+  group_by(gene_symbol) %>% 
+  filter(all(!mane_pep) | mane_pep) %>% 
+  group_by(gene_symbol, ITIMnr) %>% 
+  filter(!duplicated(gene_symbol)) %>%
+  dplyr::select(peptide_id, gene_symbol, peptide_gene, known, TMtype, 
+                actual_ITIM, total_odds, odds_filt, ITIMnr, confidence_score) %>% 
+  mutate(single = case_when(TMtype %in% c("type1","type2") ~ "single",
+                            TMtype == "multi" ~ "multi"),
+         single = factor(single, levels = c("single","multi"))) %>%
+  arrange(known, single, gene_symbol) %>%
+  ungroup() %>%
+  mutate(ITIMnr = str_replace_all(ITIMnr, "ITIM", ""),
+         gene_symbol = ifelse(known == "known",
+                              gene_symbol,
+                              1:n()),
+         gene_symbol = factor(gene_symbol, 
+                              levels = unique(str_sort(gene_symbol, 
+                                                       numeric = TRUE))))
+
+df_AF_plot %>% 
+  ggplot(mapping = aes(x = gene_symbol, y = confidence_score,
+                       color = ITIMnr)) +
+  facet_nested(~ known + single, scales = "free_x") +
+  geom_hline(yintercept = 50, alpha = 0.3) +
+  geom_hline(yintercept = 80) +
+  geom_point() +
+  guides(color = "none") +
+  scale_color_manual(values = c(hcl.colors(5, palette = "Peach"),
+                                hcl.colors(5, palette = "Peach")[4:5])) +
+  scale_y_continuous(expand = c(0,1),
+                      limits = c(20,100)) +
+  theme_minimal() +
+  theme(axis.ticks.x = element_blank(),
+        axis.text.x = element_text(angle = 90, hjust = 1, 
+                                   vjust = 0.5, size = 6),
+        axis.title.x = element_blank(),
+        panel.spacing = unit(0.75, "lines")) +
+  force_panelsizes(cols = c(1,0.7,0.7))
+figures1[[4]] <- last_plot()
+
+```
+
+## part 2
+
+# annotation and functions
+
+```{r}
+
+annot_files <- list.files("./data/pipeline/",pattern = "df_annotation_newhits.rds")
+annot_gene <- readRDS(paste0("./data/pipeline/",annot_files[length(annot_files)]))
+
+annot_plot <- annot_gene %>% 
+  distinct(gene_symbol, known) %>%
+  remove_rownames() %>% 
+  column_to_rownames("gene_symbol")
+
+genes_single <- annot_gene %>% 
+  filter(single == "single") %>% 
+  pull(gene_symbol) %>% 
+  unique()
+
+genes_multi <- annot_gene %>% 
+  filter(single == "multi") %>% 
+  pull(gene_symbol) %>% 
+  unique()
+
+innate_cells <- "NK|Mono|Neutro"
+adaptive_cells <- "B cells|CD4|CD8"
+myeloid_cells <- "Mono|Neutro"
+
+celltypes <- c("Neutrophils",
+               "Monocytes",
+               "NK cells",
+               "B cells",
+               "CD4 T cells",
+               "CD8 T cells")
+
+celltypes_full <- c("Neutrophils_R",
+                    "Neutrophils_S",
+                    "Monocytes_R",
+                    "Monocytes_S",
+                    "NK cells_R",
+                    "NK cells_S",
+                    "B cells_R",
+                    "B cells_S",
+                    "CD4 T cells_R",
+                    "CD4 T cells_S",
+                    "CD8 T cells_R",
+                    "CD8 T cells_S")
+
+annot_col <- tibble(celltype = celltypes_full) %>%
+  mutate(response = case_when(str_detect(celltype, innate_cells) ~ "innate",
+                              str_detect(celltype, adaptive_cells) ~ "adaptive"),
+         activation = case_when(str_detect(celltype, "_R") ~ "resting",
+                                str_detect(celltype, "_S") ~ "stimulated"),
+         lineage = case_when(str_detect(celltype, myeloid_cells) ~ "myeloid",
+                             !str_detect(celltype, myeloid_cells) ~ "lymphoid")) %>%
+  column_to_rownames("celltype")
+
+annot_colors <- list(TMtype = c(type1 = hcl.colors(3, "Temps")[1],
+                                type2 = hcl.colors(3, "Temps")[2],
+                                multi = hcl.colors(3, "Temps")[3]),
+                     nr_ITIMs = rev(hcl.colors(20, "Batlow")),
+                     known = c(known = hcl.colors(2, "Viridis")[1], 
+                               unknown = hcl.colors(2, "Viridis")[2]),
+                     ITSM = c(ITIM_ITSM = hcl.colors(3, "Hawaii")[1],
+                              ITSM = hcl.colors(3, "Hawaii")[2],
+                              noITSM = hcl.colors(3, "Hawaii")[3]),
+                     response = c(innate = hcl.colors(2, "Cyan-Magenta")[1],
+                                adaptive = hcl.colors(2, "Cyan-Magenta")[2]),
+                     activation = c(resting = hcl.colors(2, "Green-Orange")[1],
+                                     stimulated = hcl.colors(2, "Green-Orange")[2]),
+                     lineage = c(myeloid = hcl.colors(2, "Harmonic")[1],
+                                 lymphoid = hcl.colors(2, "Harmonic")[2]))
+
+funcat_heatmap <- function(x, width = 10, height = 35,
+                           cluster_cols = FALSE,
+                           annotation_colors = annot_colors,
+                           annotation_row = annot_plot,
+                           annotation_col = annot_col,
+                           gaps_col = seq(from = 0, to = ncol(x), by = 2),
+                           color = c("grey20", hcl.colors(n = 1000,
+                                                          palette = "Plasma")),
+                           fontsize_row = 8,
+                           cellwidth = 25, ...){
+  figure <- x %>%  
+    pheatmap(annotation_row = annotation_row,
+             annotation_colors = annotation_colors,
+             annotation_col = annotation_col,
+             cluster_cols = cluster_cols,
+             gaps_col = gaps_col,
+             width = width, height = height,
+             color = color, fontsize_row = fontsize_row,
+             cellwidth = cellwidth, ...)
+  figure$gtable
+}
+
+funcat_barplot <- function(x){
+  
+  df_bars <- x %>% 
+  distinct(gene_symbol, celltype, logFC, fun_cat, known) %>%
+  group_by(celltype, fun_cat) %>%
+  summarise(count = n())
+
+total_genes <- df_bars$count %>% sum()/6
+
+df_bars %>% 
+  ggplot(mapping = aes(x = celltype, y = count, fill = fun_cat)) +
+  geom_bar(stat = "identity", color = "black") +
+  scale_fill_manual(name = "receptor category",
+                    values = c("floralwhite", hcl.colors(4, "Set 2"))) +
+  scale_y_continuous(breaks = ceiling(seq(from = 0, 
+                                          to = total_genes, 
+                                          length.out = 6)),
+                     expand = c(0, 2)) +
+  guides(fill = guide_legend(nrow = 2,
+                             byrow = TRUE,
+                             title.position = "top")) +
+  theme_minimal() +
+  theme(axis.text = element_text(size = 12),
+        axis.title.x = element_blank(),
+        axis.title.y = element_text(size = 15),
+        legend.text = element_text(size = 10),
+        legend.title = element_text(size = 12),
+        legend.position = "bottom",
+        legend.spacing.y = unit(0.05, "cm"),
+        legend.spacing.x = unit(0.1, "cm"),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor = element_blank())
+}
+
+funcat_upset <- function(x, ...){
+  
+  int <- x %>%
+    dplyr::select(gene_symbol, celltype, fun_cat) %>%
+    distinct() %>%
+    mutate(expression = case_when(fun_cat == "not expressed" ~ 0,
+                                !fun_cat == "not expressed" ~ 1)) %>%
+    pivot_wider(id_cols = -fun_cat,
+                names_from = celltype,
+                values_from = expression) %>% 
+    ungroup %>%
+    filter(!if_all(-"gene_symbol", ~ .x == 1))
+  
+  print(n_distinct(x$gene_symbol) - nrow(int))
+  
+  int %>% 
+    as.data.frame() %>%
+    upset(nsets = 7, nintersects = NA,  point.size = 3,
+          sets = rev(celltypes),
+          keep.order = TRUE, mainbar.y.max = 15)
+}
+
+```
+
+# figures part 2
+
+```{r}
+
+processed2 <- paste0(list.dirs("./processed/part2")[length(list.dirs("./processed/part2"))],"/")
+date2 <- str_replace_all(str_extract(processed2, "/[:digit:]*/"),"/","")
+figures2 <- list()
+
+df_logFC <- readRDS(paste0(processed2,date2,"_df_logFC.rds"))
+df_matrix <- readRDS(paste0(processed2,date2,"_df_matrix.rds"))
+
+fig_2a <- df_matrix %>% 
+  subset(rownames(.) %in% genes_single) %>% 
+  subset(rowSums(.) > 0) %>% 
+  funcat_heatmap()
+grid::grid.draw(fig_2a)
+figures2[[1]] <- fig_2a
+
+df_logFC %>% 
+  filter(gene_symbol %in% genes_single) %>% 
+  funcat_barplot()
+figures2[[2]] <- last_plot()
+
+fig_2c <- df_logFC %>% 
+  filter(gene_symbol %in% genes_single) %>% 
+  funcat_upset()
+fig_2c
+figures2[[3]] <- fig_2c
+
+
+fig_s2a <- df_matrix %>% 
+  subset(rownames(.) %in% genes_multi) %>% 
+  subset(rowSums(.) > 0) %>% 
+  funcat_heatmap(border_color = NA)
+grid::grid.draw(fig_s2a)
+figures2[[4]] <- fig_s2a
+
+df_logFC %>% 
+  filter(gene_symbol %in% genes_multi) %>% 
+  funcat_barplot()
+figures2[[5]] <- last_plot()
+
+fig_s2c <- df_logFC %>% 
+  filter(gene_symbol %in% genes_multi) %>% 
+  funcat_upset()
+fig_s2c
+figures2[[6]] <- fig_s2c
+
+```
+
+## part 3
+
+# annotation and functions
+
+```{r}
+
+processed3 <- paste0(list.dirs("./processed/part3")[length(list.dirs("./processed/part3"))],"/")
+date3 <- str_replace_all(str_extract(processed3, "/[:digit:]*/"),"/","")
+
+subset_order <- c("naive",
+                  "effector memory",
+                  "EMRA",
+                  "KIR T cell",
+                  "memory",
+                  "exhausted",
+                  "resident memory",
+                  "Th17",
+                  "regulatory",
+                  "follicular helper",
+                  "other")
+
+annot_col3 <- readRDS(paste0(processed3,date3,"_annot_col.rds")) %>% 
+  mutate(subset2 = paste(celltype,subset,sep = "_")) %>% 
+  distinct(subset2,subset,celltype) %>% 
+  as_tibble(rownames = NULL) %>% 
+  column_to_rownames("subset2")
+
+colors_subsets <- c(hcl.colors(5,"Set2"),hcl.colors(6,"Zissou1"))
+names(colors_subsets) <- subset_order
+
+annot_colors3 <- list(known = c(known = hcl.colors(2, "Viridis")[1],
+                                unknown = hcl.colors(2, "Viridis")[2]),
+                      celltype = c(CD4 = hcl.colors(2, "Cyan-Magenta")[1],
+                                   CD8 = hcl.colors(2, "Cyan-Magenta")[2]),
+                      subset = colors_subsets)
+
+determine_counts <- function(x){
+  x %>%
+    filter(mean > 0) %>%
+    group_by(celltype, subset) %>%
+    summarise(count = n())
+}
+
+TILs_heatmap <- function(x, ...) {
+  df_matrix <- x %>%
+  group_by(celltype,subset) %>% 
+  mutate(mean = ifelse(mean < 0, 0, mean),
+         subset = paste(celltype,subset,sep = "_"),
+         subset = factor(subset, levels = unique(subset))) %>% 
+  arrange(celltype, subset) %>% 
+  pivot_wider(id_cols = subset,
+              names_from = gene_symbol,
+              values_from = mean) %>%
+  column_to_rownames("subset") %>% 
+  as.matrix() %>% 
+  t()
+  
+  figure <- df_matrix %>%
+    pheatmap(scale = "none",
+             cluster_cols = FALSE,
+             annotation_col = annot_col3,
+             annotation_row = annot_plot,
+             annotation_colors = annot_colors3,
+             fontsize_row = 8,
+             color = c("grey20", hcl.colors(1000,
+                                            palette = "RdYlBu",
+                                            rev = TRUE)),
+             cellwidth = 18,
+             gaps_col = 8,
+             ...)
+  
+  figure$gtable
+}
+
+barplot_counts <- function(data, x, y){
+  
+  max_val <- data %>% 
+    pull(get(y)) %>% 
+    max()
+  
+  axis_max <- plyr::round_any(max_val, 20, ceiling)
+  
+  data %>% 
+    ggplot(mapping = aes(x = get(x), y = get(y), fill = subset)) +
+    facet_wrap(~ celltype, scales = "free_x", nrow = 2) +
+    geom_bar(color = "black",
+             linewidth = 0.1,
+             stat = "identity") +
+    guides(fill = guide_legend(nrow = 3,
+                               byrow = FALSE,
+                               title.position = "top")) +
+    scale_fill_manual(values = colors_subsets) +
+    scale_y_continuous(breaks = seq(from = 0, to = axis_max, by = 20),
+                       limits = c(0, axis_max),
+                       expand = c(0, 2)) +
+    theme_minimal() +
+    theme(axis.text = element_text(size = 10),
+          axis.text.x = element_blank(),
+          axis.title.x = element_blank(),
+          axis.title.y = element_text(size = 15),
+          legend.text = element_text(size = 14),
+          legend.title = element_text(size = 16),
+          legend.position = "bottom",
+          legend.spacing.y = unit(0.05, "cm"),
+          legend.spacing.x = unit(0.1, "cm"),
+          panel.grid.major.x = element_blank(),
+          panel.grid.minor = element_blank())
+}
+
+TILs_upset <- function(x, cell_select, ...) {
+  x %>% 
+    mutate(expr = ifelse(mean > 0, TRUE, FALSE)) %>%
+    group_by(celltype, subset, gene_symbol) %>%
+    mutate(check = any(mean > 0)) %>%
+    distinct(celltype, subset, gene_symbol, check) %>%
+    ungroup() %>%
+    mutate(subset = paste(celltype, subset, sep = "_")) %>%
+    pivot_wider(id_cols = gene_symbol,
+                names_from = subset,
+                values_from = check) %>%
+    mutate(across(-gene_symbol, function(x) case_when(x ~ 1,
+                                                      !x ~ 0))) %>% 
+    dplyr::select(gene_symbol, contains(cell_select)) %>%
+    column_to_rownames("gene_symbol") %>%
+    upset(nsets = 8, nintersects = NA, sets = rev(colnames(.)), keep.order = TRUE,
+          point.size = 1.8, ...)
+}
+
+```
+
+# figures part 3
+
+```{r}
+
+figures3 <- list()
+
+if(!exists("df_TIL_single")) {
+df_TIL_single <- readRDS(paste0(processed3,date3,"_df_TIL.rds")) %>% 
+  filter(gene_symbol %in% genes_single) %>% 
+  group_by(gene_symbol, celltype, subset,  meta.cluster) %>%
+  summarise(expr = mean(expr),
+            sum_meta = n()) %>% 
+  group_by(gene_symbol, celltype, subset) %>%
+  summarise(mean = weighted.mean(expr,sum_meta))
+}
+
+fig_3a <- df_TIL_single %>% 
+  TILs_heatmap
+grid::grid.draw(fig_3a)
+figures3[[1]] <- fig_3a
+  
+df_TIL_single %>% 
+  determine_counts %>% 
+  barplot_counts(x = "subset",
+                 y = "count")
+figures3[[2]] <- last_plot()
+
+
+if(!exists("df_TIL_multi")) {
+df_TIL_multi <- readRDS(paste0(processed3,date3,"_df_TIL.rds")) %>% 
+  filter(gene_symbol %in% genes_multi) %>% 
+  group_by(gene_symbol, celltype, subset,  meta.cluster) %>%
+  summarise(expr = mean(expr),
+            sum_meta = n()) %>% 
+  group_by(gene_symbol, celltype, subset) %>%
+  summarise(mean = weighted.mean(expr,sum_meta))
+}
+
+fig_s3a <- df_TIL_multi %>% 
+  TILs_heatmap(border_color = NA)
+grid::grid.draw(fig_s3a)
+figures3[[3]] <- fig_s3a
+
+df_TIL_multi %>% 
+  determine_counts %>% 
+  barplot_counts(x = "subset",
+                 y = "count")
+figures3[[4]] <- last_plot()
+
+```
+
+## create figures
+
+```{r eval = FALSE}
+
+fig_labels <- toupper(letters)
+
+ggarrange(NULL,
+          ggarrange(plotlist = figures1[c(1,4)], 
+                    nrow = 2,
+                    labels = fig_labels[2:3]),
+          widths = c(0.5,1),
+          labels = fig_labels[1])
+ggsave(filename = paste0(plotsF,todate,"_figure_1.pdf"),
+       width = 15, height = 10)
+
+ggarrange(ggarrange(plotlist = figures1[2:3], 
+                    ncol = 2,
+                    labels = fig_labels[1:2]),
+          NULL,
+          heights = c(1,0.75),
+          nrow = 2,
+          labels = c("","C"))
+ggsave(filename = paste0(plotsF,todate,"_figure_1S.pdf"),
+       width = 8, height = 10)
+
+
+ggarrange(figures2[[1]],
+          ggarrange(plotlist = append(figures2[2],
+                                      list(NULL)), 
+                    nrow = 2,
+                    labels = fig_labels[2:3],
+                    heights = c(1,0.6)),
+          labels = "A",
+          widths = c(1,0.8),
+          ncol = 2)
+ggsave(filename = paste0(plotsF,todate,"_figure_2.pdf"),
+       height = 15, width = 15)
+
+ggarrange(figures2[[4]],
+          ggarrange(plotlist = append(figures2[5],
+                                      list(NULL)), 
+                    nrow = 2,
+                    labels = fig_labels[2:3],
+                    heights = c(1,0.6)),
+          labels = "A",
+          widths = c(1,0.8),
+          ncol = 2)
+ggsave(filename = paste0(plotsF,todate,"_figure_2S.pdf"),
+       height = 15, width = 15)
+
+
+
+ggarrange(figures3[[1]],
+          ggarrange(figures3[[2]],
+                    labels = fig_labels[2]), 
+          labels = fig_labels[1])
+ggsave(filename = paste0(plotsF,todate,"_figure_3.pdf"),
+       height = 15, width = 15)
+
+
+ggarrange(figures3[[3]],
+          ggarrange(figures3[[4]],
+                    labels = fig_labels[2]), 
+          labels = fig_labels[1])
+ggsave(filename = paste0(plotsF,todate,"_figure_3S.pdf"),
+       height = 15, width = 15)
+
+```
+
+## export upset plots
+
+```{r eval = FALSE}
+
+if(!dir.exists(file.path(plotsF,"upset"))){
+  dir.create(file.path(plotsF,"upset"))
+}
+
+upset_plots <- append(figures2[c(3,6)],figures3[c(3,4,7,8)])
+
+upset_names <- c("_fig2c",
+                 "_figs2c",
+                 "_fig3c1",
+                 "_fig3c2",
+                 "_figs3c1",
+                 "_figs3c2")
+
+for (i in 1:length(upset_plots)) {
+  if (i %in% 1:2){
+    pdf(file = paste0(plotsF, "upset/", todate, upset_names[i], ".pdf"),
+        onefile = FALSE,
+        width = 8,
+        height = 6)
+    print(upset_plots[i])
+    dev.off()
+  } else if (i %in% 3:6){
+    pdf(file = paste0(plotsF, "upset/", todate, upset_names[i], ".pdf"),
+        onefile = FALSE,
+        width = 8,
+        height = 8)
+    print(upset_plots[i])
+    dev.off()
+  }
+}
+
+```
+
+
