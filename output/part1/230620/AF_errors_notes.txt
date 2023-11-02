@@ -1,0 +1,14 @@
+no .pdb, too long for AlphaFold ENSP00000347667_RYR1
+no .pdb, too long for AlphaFold ENSP00000352608_RYR1
+no ranked_0 found ENSP00000359365_MAGEA4 ranked_1.pdb instead
+no .pdb, too long for AlphaFold ENSP00000355533_RYR2
+no ranked_0 found ENSP00000359403_CD99L2 ranked_1.pdb instead
+no ranked_0 found ENSP00000355718_DLL1 ranked_1.pdb instead
+no ranked_0 found ENSP00000358413_ZDHHC6 ranked_1.pdb instead
+no ranked_0 found ENSP00000359360_MAGEA4 ranked_1.pdb instead
+no .pdb, too long for AlphaFold ENSP00000356224_SYNE1
+no .pdb, too long for AlphaFold ENSP00000396024_SYNE1
+no .pdb, AlphaFold had error ENSP00000427238_CACNA1G
+no .pdb, AlphaFold had error ENSP00000425451_CACNA1G
+no .pdb, AlphaFold had error ENSP00000506116_HTT
+no .pdb, too long for AlphaFold ENSP00000508756_DNAH3
