@@ -109,9 +109,9 @@ collapse_list <- function(x) {
 
 ## import ensembl for topology prediction
 
-There are multiple methods to determine protein topology based on amino acid sequence. However, based on literature and also with the old pipeline in mind, I decided to use [TOPCONS](https://doi.org/10.1093/nar/gkv485). A good alternative would be "DeepTMHMM", which has to be run on Linux
+There are multiple methods to determine protein topology based on amino acid sequence. However, based on literature and also with the old pipeline in mind, I decided to use [TOPCONS](https://doi.org/10.1093/nar/gkv485). 
 
-First thing was to retrieve all peptide sequences from a database, went for ensembl and all ensembl_peptide_ids for this. Sequences were filtered for to only include protein coding sequences, and ahve to contain an ITIM sequence to already cut down on number of sequences that have to be run. The remaining sequences in the .fa fasta file have then to be loaded into TOPCONS (run rst_ekt3evqo, done on 24-06-2022). This includes in total 96,457 protein sequences.
+First thing was to retrieve all peptide sequences from a database, went for ensembl and all ensembl_peptide_ids for this. Sequences were filtered for to only include protein coding sequences, and have to contain an ITIM sequence to already cut down on number of sequences that have to be run. The remaining sequences in the .fa fasta file have then to be loaded into TOPCONS (run rst_ekt3evqo, done on 24-06-2022). This includes in total 96,457 protein sequences.
 
 ```{r}
 
@@ -167,7 +167,7 @@ if(!file.exists(paste0(processedF,"topologies_anyITIM.rds"))){
 
   check_knowns(peptides_anyITIM$peptide_id)
 
-  topcons_result <- read_lines("./data/rst_ekt3evqo/220624_topcons_results.txt",
+  topcons_result <- read_lines("./data/220624_topcons_results.txt",
                              skip = 4)
 
   topologies_anyITIM <- tibble(peptide_id = gsub("Sequence name: ","",
@@ -689,6 +689,10 @@ df_clean_mane %>%
 Export all information, annotation and files for downstream purposes 
 
 ```{r}
+
+if(!dir.exists("./data/pipeline/")){
+  dir.create("./data/pipeline/")
+}
 
 c(new_hits[new_hits %in% knownr],
   new_hits[!new_hits %in% knownr]) %>% 

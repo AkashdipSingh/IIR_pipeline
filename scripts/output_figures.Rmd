@@ -28,8 +28,6 @@ library(ggh4x)
 library(ggplotify)
 
 todate <- format(Sys.Date(),"%y%m%d")
-todate <- "230222"
-todate <- "230306"
 todate <- "230418"
 
 dir.create(file.path("./plots/pdf",todate,"/"), recursive = TRUE)
