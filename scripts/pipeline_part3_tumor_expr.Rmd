@@ -215,5 +215,351 @@ annot_col <- bind_rows(annot_col8, annot_col4) %>%
 annot_col %>% 
   saveRDS(paste0(processedF,todate,"_annot_col.rds"))
 
+```
+
+## eLife revision -  functional categories - figure 3 - figure supplement 2
+## authored by SVV
+
+```{r eval = FALSE}
+
+df_logFC_CD4_fun_cat <- readRDS("./processed/part2/230620/df_logFC_CD4_fun_cat.rds")
+df_logFC_CD8_fun_cat <- readRDS("./processed/part2/230620/df_logFC_CD8_fun_cat.rds")
+
+
+df_clean_fun_cat <- df_all %>%
+  #filter(gene_symbol %in% genes_single) %>%
+  group_by(gene_symbol, celltype, subset,  meta.cluster) %>%
+  summarise(expr = mean(expr),
+            sum_meta = n()) %>% 
+  group_by(gene_symbol, celltype, subset) %>%
+  summarise(mean = weighted.mean(expr,sum_meta))
+
+df_clean_fun_cat_CD4 <- df_clean_fun_cat %>%
+  filter(celltype == "CD4")
+
+df_clean_fun_cat_CD8 <- df_clean_fun_cat %>%
+  filter(celltype == "CD8")
+
+
+df_clean_fun_cat_CD4 <- left_join(df_clean_fun_cat_CD4, df_logFC_CD4_fun_cat, by = "gene_symbol")
+
+df_clean_fun_cat_CD8 <- left_join(df_clean_fun_cat_CD8, df_logFC_CD8_fun_cat, by = "gene_symbol")
+
+
+df_clean_fun_cat <- rbind(df_clean_fun_cat_CD4, df_clean_fun_cat_CD8)
+
+#replace NA for fun_cat (because genes were absent in RNAseq df) with not expressed
+df_clean_fun_cat %>%
+  filter(is.na(fun_cat) | fun_cat == "")
+
+df_clean_fun_cat <- df_clean_fun_cat %>%
+  mutate(fun_cat = replace_na(fun_cat, "not expressed"))
+
+df_barplot_single_fun_cat <- df_clean_fun_cat %>%
+  filter(mean > 0) %>%
+  filter(gene_symbol %in% genes_single) %>% 
+  distinct(gene_symbol, celltype, subset, fun_cat) %>%
+  group_by(celltype, subset, fun_cat) %>%
+  summarise(count = n()) 
+
+df_barplot_single_fun_cat %>% 
+  ggplot(mapping = aes(x = subset, y = count, fill = fun_cat)) +
+  facet_wrap(~ celltype, scales = "free_x") +
+  geom_bar(color = "black",
+           linewidth = 0.1,
+           stat = "identity") +
+  theme_minimal() +
+  scale_fill_manual(name = "receptor category in vitro",
+                    values = c("floralwhite",hcl.colors(4,"Set 2"))) +
+  scale_y_continuous(breaks = seq(from = 0, to = 100, by = 20),
+                     limits = c(0,100),
+                     expand = c(0,2)) +
+  guides(fill = guide_legend(ncol = 1,
+                             byrow = TRUE,
+                             title.position = "top")) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1,
+                                   vjust = 1.1)) +
+  theme(panel.grid.major.x = element_blank(),
+           panel.grid.minor.x = element_blank())
+ggsave(paste0(plotsF,todate,"_single_subsets_fun_cat.pdf"),
+       width = 12, height = 8)
+
+df_barplot_multi_fun_cat <- df_clean_fun_cat %>%
+  filter(mean > 0) %>%
+  filter(gene_symbol %in% genes_multi) %>% 
+  distinct(gene_symbol, celltype, subset, fun_cat) %>%
+  group_by(celltype, subset, fun_cat) %>%
+  summarise(count = n()) 
+
+df_barplot_multi_fun_cat %>% 
+  ggplot(mapping = aes(x = subset, y = count, fill = fun_cat)) +
+  facet_wrap(~ celltype, scales = "free_x") +
+  geom_bar(color = "black",
+           linewidth = 0.1,
+           stat = "identity") +
+  theme_minimal() +
+  scale_fill_manual(name = "receptor category in vitro",
+                    values = c("floralwhite",hcl.colors(4,"Set 2"))) +
+  scale_y_continuous(breaks = seq(from = 0, to = 100, by = 20),
+                     limits = c(0,100),
+                     expand = c(0,2)) +
+  guides(fill = guide_legend(ncol = 1,
+                             byrow = TRUE,
+                             title.position = "top")) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1,
+                                   vjust = 1.1)) +
+  theme(panel.grid.major.x = element_blank(),
+           panel.grid.minor.x = element_blank())
+ggsave(paste0(plotsF,todate,"_multi_subsets_fun_cat.pdf"),
+       width = 12, height = 8)
+
+
+
+```
+
+## eLife revision - expression known receptors in melanoma scRNAseq data - figure 3 - figure supplement 3
+## authored by SVV
+
+```{r eval = FALSE}
+
+CD8_expr <- readRDS("./data/RNAseq/TILs_Zheng/221219_df8_expr.rds")
+CD4_expr <- readRDS("./data/RNAseq/TILs_Zheng/221219_df4_expr.rds")
+
+metadata_CD8 <- readRDS(paste0("./data/RNAseq/TILs_Zheng/CD8meta.tb.rds")) %>% 
+  distinct(miniCluster, dataset, meta.cluster, cancerType)
+
+metadata8_melanoma <- metadata_CD8 %>% filter(cancerType == "Melanoma")
+metadata8_melanoma <- metadata8_melanoma[,1:3]
+
+annot_col8_melanoma <- tibble(cluster = unique(metadata8_melanoma$meta.cluster)) %>% 
+  mutate(subset = case_when(grepl("Tk",cluster) ~ "KIR T cell",
+                           grepl("Tem\\.",cluster) ~ "effector memory",
+                           grepl("Tex\\.",cluster) ~ "exhausted",
+                           grepl("Tn\\.",cluster) ~ "naive",
+                           grepl("Temra\\.",cluster) ~ "EMRA",
+                           grepl("Tm\\.",cluster) ~ "memory",
+                           grepl("Trm\\.",cluster) ~ "resident memory",
+                           TRUE ~ "other"),
+        subset = factor(subset, level = CD8_subsets)) %>% 
+  column_to_rownames("cluster") %>% 
+  as.data.frame()
+
+df8_melanoma <- CD8_expr %>% 
+  left_join(metadata8_melanoma, by = c("sample" = "miniCluster")) %>%
+  left_join(as_tibble(annot_col8_melanoma, rownames = "meta.cluster")) %>%
+  dplyr::select(sample, meta.cluster, subset, any_of(new_hits)) %>% 
+  arrange(subset) %>% 
+  pivot_longer(cols = any_of(new_hits),
+               names_to = "gene_symbol",
+               values_to = "expr") %>% 
+  mutate(celltype = "CD8")
+
+df8_melanoma <- df8_melanoma %>%
+  filter(!is.na(meta.cluster) & !is.na(subset))
+
+metadata_CD4 <- readRDS(paste0("./data/RNAseq/TILs_Zheng/CD4meta.tb.rds")) %>% 
+  distinct(miniCluster, dataset, meta.cluster, cancerType)
+
+metadata4_melanoma <- metadata_CD4 %>% filter(cancerType == "MELA")
+metadata4_melanoma <- metadata4_melanoma[,1:3]
+
+annot_col4_melanoma <- tibble(cluster = unique(metadata4_melanoma$meta.cluster)) %>% 
+  mutate(subset = case_when(grepl("Tfh",cluster) ~ "follicular helper",
+                            grepl("Tem\\.",cluster) ~ "effector memory",
+                            grepl("Th17\\.",cluster) ~ "Th17",
+                            grepl("Tn\\.",cluster) ~ "naive",
+                            grepl("Temra\\.",cluster) ~ "EMRA",
+                            grepl("Tm\\.",cluster) ~ "memory",
+                            grepl("Treg\\.",cluster) ~ "regulatory",
+                            TRUE ~ "other"),
+         subset = factor(subset, levels = CD4_subsets)) %>%
+  column_to_rownames("cluster") %>% 
+  as.data.frame()
+
+df4_melanoma <- CD4_expr %>% 
+  left_join(metadata4_melanoma, by = c("sample" = "miniCluster")) %>%
+  left_join(as_tibble(annot_col4_melanoma, rownames = "meta.cluster")) %>%
+  dplyr::select(sample, meta.cluster, subset, any_of(new_hits)) %>% 
+  arrange(subset) %>% 
+  pivot_longer(cols = any_of(new_hits),
+               names_to = "gene_symbol",
+               values_to = "expr") %>% 
+  mutate(celltype = "CD4")
+
+df4_melanoma <- df4_melanoma %>%
+  filter(!is.na(meta.cluster) & !is.na(subset))
+
+subset_order <- c("naive",
+                  "effector memory",
+                  "EMRA",
+                  "KIR T cell",
+                  "memory",
+                  "exhausted",
+                  "resident memory",
+                  "Th17",
+                  "regulatory",
+                  "follicular helper",
+                  "other")
+
+df_all_melanoma <- bind_rows(df8_melanoma, df4_melanoma) %>% 
+  mutate(subset = factor(subset, levels = subset_order))
+
+df_all_melanoma %>%
+  saveRDS(paste0(processedF,todate,"_df_TIL_melanoma.rds"))
+
+annot_col_melanoma <- bind_rows(annot_col8_melanoma, annot_col4_melanoma) %>% 
+  mutate(celltype = case_when(grepl("CD8",rownames(.)) ~ "CD8",
+                              grepl("CD4",rownames(.)) ~ "CD4"))
+
+annot_col_melanoma %>% 
+  saveRDS(paste0(processedF,todate,"_annot_col_melanoma.rds"))
+
+#plots
+genes_RNAseq_melanoma <- df_all_melanoma %>% 
+  pull(gene_symbol) %>% 
+  unique()
+
+genes_single %in% genes_RNAseq_melanoma %>% sum
+genes_multi %in% genes_RNAseq_melanoma %>% sum
+
+
+df_clean_melanoma_single <- df_all_melanoma %>%
+  filter(gene_symbol %in% genes_single) %>%
+  group_by(gene_symbol, celltype, subset,  meta.cluster) %>%
+  summarise(expr = mean(expr),
+            sum_meta = n()) %>% 
+  group_by(gene_symbol, celltype, subset) %>%
+  summarise(mean = weighted.mean(expr,sum_meta))
+
+df_clean_melanoma_single_known <- df_all_melanoma %>%
+  filter(gene_symbol %in% genes_single) %>%
+  filter(gene_symbol %in% genes_known) %>%
+  group_by(gene_symbol, celltype, subset,  meta.cluster) %>%
+  summarise(expr = mean(expr),
+            sum_meta = n()) %>% 
+  group_by(gene_symbol, celltype, subset) %>%
+  summarise(mean = weighted.mean(expr,sum_meta))
+
+df_counts_melanoma_single <- df_clean_melanoma_single %>%
+  filter(mean > 0) %>%
+  group_by(celltype, subset) %>%
+  summarise(count = n())
+
+df_counts_melanoma_single %>% 
+  ggplot(mapping = aes(x = subset, y = count, fill = subset)) +
+  facet_wrap(~ celltype, scales = "free_x") +
+  geom_bar(color = "black",
+           linewidth = 0.1,
+           stat = "identity") +
+  theme_minimal() +
+  scale_fill_manual(values = hcl.colors(11, 
+                                        palette = "Set 2")) +
+  scale_y_continuous(breaks = seq(from = 0, to = 101, by = 20),
+                     expand = c(0,2)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1,
+                                   vjust = 1.1))
+ggsave(paste0(plotsF,todate,"_single_subsets_melanoma.png"),
+       width = 12, height = 10)
+
+df_matrix_melanoma <- df_clean_melanoma_single %>% 
+  group_by(celltype,subset) %>% 
+  mutate(mean = ifelse(mean < 0, 0, mean),
+         subset = paste(celltype,subset,sep = "_"),
+         subset = factor(subset, levels = unique(subset))) %>% 
+  arrange(celltype, subset) %>% 
+  pivot_wider(id_cols = subset,
+              names_from = gene_symbol,
+              values_from = mean) %>%
+  column_to_rownames("subset") %>% 
+  as.matrix() %>% 
+  t()
+
+matrix_plot_melanoma <- df_matrix_melanoma %>%                  
+  pheatmap(scale = "none",
+           cluster_rows = FALSE,
+           cluster_cols = FALSE,
+           #annotation_col = annot_col,
+           annotation_row = annot_plot,
+           annotation_colors = annot_colors,
+           fontsize_row = 8,
+           color = c("grey20",hcl.colors(1000,
+                              palette = "RdYlBu",
+                              rev = TRUE)),
+           cellwidth = 18,
+           gaps_col = 8)
+
+print(matrix_plot_melanoma)
+
+pdf(paste0(plotsF, todate, "_matrix_single_melanoma_genes_alphabetical.pdf"),
+    width = 15, height = 15)
+grid::grid.newpage()
+grid::grid.draw(matrix_plot_melanoma$gtable)
+dev.off()
+
+
+
+df_matrix_melanoma_known <- df_clean_melanoma_single_known %>% 
+  group_by(celltype,subset) %>% 
+  mutate(mean = ifelse(mean < 0, 0, mean),
+         subset = paste(celltype,subset,sep = "_"),
+         subset = factor(subset, levels = unique(subset))) %>% 
+  arrange(celltype, subset) %>% 
+  pivot_wider(id_cols = subset,
+              names_from = gene_symbol,
+              values_from = mean) %>%
+  column_to_rownames("subset") %>% 
+  as.matrix() %>% 
+  t()
+
+matrix_plot_melanoma_known <- df_matrix_melanoma_known %>%                  
+  pheatmap(scale = "none",
+           cluster_rows = FALSE,
+           cluster_cols = FALSE,
+           #annotation_col = annot_col,
+           annotation_row = annot_plot,
+           annotation_colors = annot_colors,
+           fontsize_row = 8,
+           color = c("grey20",hcl.colors(1000,
+                              palette = "RdYlBu",
+                              rev = TRUE)),
+           cellwidth = 18,
+           gaps_col = 8)
+
+print(matrix_plot_melanoma_known)
+
+pdf(paste0(plotsF, todate, "_matrix_single_melanoma_known.pdf"),
+    width = 15, height = 15)
+grid::grid.newpage()
+grid::grid.draw(matrix_plot_melanoma$gtable)
+dev.off()
+
+
+row_means <- rowMeans(df_matrix_melanoma_known)
+
+df_matrix_melanoma_known_sorted <- df_matrix_melanoma_known[order(row_means, decreasing = TRUE), ]
+
+matrix_plot_melanoma_known_sorted <- df_matrix_melanoma_known_sorted %>%
+  pheatmap(scale = "none",
+           cluster_rows = TRUE,
+           cluster_cols = FALSE,
+           #annotation_col = annot_col,
+           #annotation_row = annot_plot,
+           annotation_colors = annot_colors,
+           fontsize_row = 8,
+           color = c("grey20",hcl.colors(1000,
+                              palette = "SunsetDark",
+                              rev = TRUE)),
+           cellwidth = 18,
+           gaps_col = 8)
+
+
+print(matrix_plot_melanoma_known_sorted)
+
+pdf(paste0(plotsF, todate, "_matrix_single_melanoma_known_sorted_v2.pdf"),
+    width = 8, height = 10)
+grid::grid.newpage()
+grid::grid.draw(matrix_plot_melanoma_known_sorted$gtable)
+dev.off()
+
 
 ```
