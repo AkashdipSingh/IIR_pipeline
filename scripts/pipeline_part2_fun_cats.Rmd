@@ -355,3 +355,42 @@ df_matrix %>%
              annotation_row = NA)
 
 ```
+## eLife revision figure functional categories - analysis
+## authored by SVV
+
+```{r eval = FALSE}
+
+df_logFC_CD4_fun_cat <- df_logFC %>% 
+  filter(celltype == "CD4 T cells") %>%
+  filter(!duplicated(gene_symbol),!gene_symbol == "") %>%
+  ungroup() %>%
+  dplyr::select(gene_symbol, fun_cat)
+
+df_logFC_CD4_fun_cat %>% 
+    as_tibble() %>% 
+    saveRDS(paste0(processedF,"df_logFC_CD4_fun_cat.rds"))
+
+df_logFC_CD8_fun_cat <- df_logFC %>% 
+  filter(celltype == "CD8 T cells") %>%
+  filter(!duplicated(gene_symbol),!gene_symbol == "") %>%
+  ungroup() %>%
+  dplyr::select(gene_symbol, fun_cat)
+
+df_logFC_CD8_fun_cat %>% 
+    as_tibble() %>% 
+    saveRDS(paste0(processedF,"df_logFC_CD8_fun_cat.rds"))
+
+#check if functional categories are the same per cell type
+colnames(df_logFC_CD4_fun_cat) <- c("gene_symbol", "fun_cat_CD4")
+colnames(df_logFC_CD8_fun_cat) <- c("gene_symbol", "fun_cat_CD8")
+
+functional_categories_CD4_CD8_merge <- left_join(df_logFC_CD4_fun_cat, df_logFC_CD8_fun_cat, by = "gene_symbol")
+
+functional_categories_CD4_CD8_merge$equal_cat <- functional_categories_CD4_CD8_merge$fun_cat_CD4 == functional_categories_CD4_CD8_merge$fun_cat_CD8
+
+functional_categories_CD4_CD8_merge %>%
+  group_by(equal_cat) %>%
+  summarise(n = n())
+#348 have identical functional category, 50 are different
+
+```
