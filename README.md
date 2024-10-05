@@ -1,6 +1,6 @@
 # IIR_pipeline
 
-The scripts in this repository correspond to different sections of the manuscript (published in [eLife](https://elifesciences.org/reviewed-preprints/92870)). Required data files can be retrieved from 10.5281/zenodo.8121610 and extracted to the /data folder.
+The scripts in this repository correspond to different sections of the manuscript (published in [eLife](https://elifesciences.org/reviewed-preprints/92870)). Required data files can be retrieved from [Zenodo](http://doi.org/10.5281/zenodo.8121610) and extracted to the /data folder.
 
 ## Part 1 - Inhibitory receptor predictions
 Corresponds to Figure 1 of the paper.
